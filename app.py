@@ -253,18 +253,42 @@ def save_uploaded_file(file_bytes: bytes, filename: str, replace_existing: bool)
     return target_path
 
 
-def get_indexed_documents() -> Tuple[List[str], int]:
-    """Retrieve indexed documents in either FastAPI mode or Direct mode."""
+def get_session_active_documents() -> Tuple[List[str], int]:
+    """
+    Retrieve documents uploaded during the current user's session that exist on disk.
+    New users always start with zero documents, ensuring total privacy and a clean default state.
+    """
+    raw_dir = os.path.join("data", "raw")
+    if "session_docs" not in st.session_state:
+        st.session_state.session_docs = []
+
+    # Keep only files that were uploaded in this session and physically exist on disk
+    valid_docs = [
+        f for f in st.session_state.session_docs
+        if os.path.isfile(os.path.join(raw_dir, f))
+    ]
+    st.session_state.session_docs = valid_docs
+
+    if not valid_docs:
+        return [], 0
+
+    total_chunks = 0
     if HAS_FASTAPI_SERVER:
         try:
             res = requests.get(f"{API_BASE_URL}/api/v1/documents", timeout=5)
             if res.status_code == 200:
                 data = res.json()
-                return data.get("documents", []), data.get("total_chunks", 0)
+                total_chunks = data.get("total_chunks", 0)
         except Exception:
             pass
-    pipeline = direct_pipeline or get_direct_pipeline()
-    return pipeline.list_documents(), pipeline.count()
+    if total_chunks == 0:
+        pipeline = direct_pipeline or get_direct_pipeline()
+        try:
+            total_chunks = pipeline.count()
+        except Exception:
+            total_chunks = 0
+
+    return valid_docs, total_chunks
 
 
 def upload_document_universal(file_bytes: bytes, filename: str, replace_existing: bool) -> Dict[str, Any]:
@@ -398,9 +422,14 @@ if "active_snippet" not in st.session_state:
 if "selected_doc" not in st.session_state:
     st.session_state.selected_doc = None
 
-active_docs, total_chunks = get_indexed_documents()
+if "session_docs" not in st.session_state:
+    st.session_state.session_docs = []
+
+active_docs, total_chunks = get_session_active_documents()
 if active_docs and (not st.session_state.selected_doc or st.session_state.selected_doc not in active_docs):
     st.session_state.selected_doc = active_docs[0]
+elif not active_docs:
+    st.session_state.selected_doc = None
 
 
 def set_pdf_page_jump(page: int, filename: Optional[str] = None, snippet: Optional[str] = None):
@@ -448,7 +477,7 @@ with top_col2:
 
 
 # ==========================================
-# 2. Document Banner
+# 2. Document Banner & Onboarding Card
 # ==========================================
 selected_target_doc: Optional[str] = st.session_state.selected_doc
 
@@ -470,43 +499,60 @@ if active_docs and not st.session_state.show_uploader:
 
 elif not active_docs or st.session_state.show_uploader:
     with st.container():
-        st.markdown('<div class="upload-card">', unsafe_allow_html=True)
-        st.subheader("📄 Upload Document")
-        st.caption("Upload a PDF, Markdown, or text file. It will be indexed into Hybrid BM25 + Vector Search.")
+        st.markdown(
+            '<div class="upload-card" style="max-width: 820px; margin: 25px auto; padding: 26px; border: 1px solid #E2E8F0; border-radius: 12px; background: #FFFFFF; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">'
+            '<h3 style="margin-top:0; color:#1E293B;">📄 Welcome! Upload Your Document</h3>'
+            '<p style="color:#64748B; font-size:14px; margin-bottom: 18px;">Upload a PDF, Markdown, or text file to start reading and chatting. Your document is private to your session.</p>',
+            unsafe_allow_html=True,
+        )
+
+        uploaded_file = st.file_uploader(
+            "Choose file",
+            type=["pdf", "md", "txt"],
+            label_visibility="collapsed",
+            key="main_session_uploader",
+        )
 
         up_col1, up_col2 = st.columns([3, 1])
         with up_col1:
-            uploaded_file = st.file_uploader(
-                "Choose file",
-                type=["pdf", "md", "txt"],
-                label_visibility="collapsed",
-            )
+            if uploaded_file is not None:
+                if st.button("🚀 Index & Start Chatting", type="primary", use_container_width=True, key="start_chat_btn"):
+                    with st.spinner(f"Indexing '{uploaded_file.name}' into vector store & BM25 index..."):
+                        try:
+                            stats = upload_document_universal(
+                                file_bytes=uploaded_file.getvalue(),
+                                filename=uploaded_file.name,
+                                replace_existing=True,
+                            )
+                            chunk_count = stats.get("total_chunks", 0)
+                            st.session_state.session_docs = [uploaded_file.name]
+                            st.session_state.selected_doc = uploaded_file.name
+                            st.session_state.pdf_page = 1
+                            st.session_state.active_snippet = None
+                            st.session_state.show_uploader = False
+                            st.session_state.messages = []
+                            st.session_state.view_mode = "📖 Split View"
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to index document: {str(e)}")
+            else:
+                st.caption("💡 Select a document above to begin.")
+
         with up_col2:
-            replace_docs = st.checkbox("🧹 Clean Mode (Replace old files)", value=True if not active_docs else False)
-            if active_docs and st.button("Cancel", use_container_width=True):
-                st.session_state.show_uploader = False
-                st.rerun()
+            if active_docs and st.session_state.show_uploader:
+                if st.button("Cancel", use_container_width=True, key="cancel_upload_btn"):
+                    st.session_state.show_uploader = False
+                    st.rerun()
 
-        if uploaded_file is not None:
-            if st.button("🚀 Index & Start Chatting", type="primary", use_container_width=True):
-                with st.spinner(f"Indexing '{uploaded_file.name}' into vector store & BM25 index..."):
-                    try:
-                        stats = upload_document_universal(
-                            file_bytes=uploaded_file.getvalue(),
-                            filename=uploaded_file.name,
-                            replace_existing=replace_docs,
-                        )
-                        chunk_count = stats.get("total_chunks", 0)
-                        st.session_state.selected_doc = uploaded_file.name
-                        st.session_state.pdf_page = 1
-                        st.session_state.active_snippet = None
-                        st.session_state.show_uploader = False
-                        st.success(f"Indexed **{chunk_count}** chunks from **{uploaded_file.name}**!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to index document: {str(e)}")
-
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div style="margin-top: 18px; border-top: 1px solid #F1F5F9; padding-top: 16px;">', unsafe_allow_html=True)
+        feat_c1, feat_c2, feat_c3 = st.columns(3)
+        with feat_c1:
+            st.markdown("<strong>📖 Dual-Pane Layout</strong><br/><span style='font-size:12px; color:#64748B;'>Interactive PDF preview alongside real-time chat.</span>", unsafe_allow_html=True)
+        with feat_c2:
+            st.markdown("<strong>⚡ ChatGPT Streaming</strong><br/><span style='font-size:12px; color:#64748B;'>Fluid token typing cadence powered by Gemini.</span>", unsafe_allow_html=True)
+        with feat_c3:
+            st.markdown("<strong>🔍 Verified Citations</strong><br/><span style='font-size:12px; color:#64748B;'>Click any citation to jump & highlight text.</span>", unsafe_allow_html=True)
+        st.markdown('</div></div>', unsafe_allow_html=True)
 
 
 # ==========================================
@@ -665,8 +711,7 @@ def render_document_viewer(docs: List[str], current_target_doc: Optional[str]):
         st.text_area("Document Content", value=text_content, height=650, disabled=True)
 
     else:
-        st.info(f"Viewing metadata for **{target_name}**.")
-        st.caption("Raw file preview will appear here once saved in local storage.")
+        st.warning(f"⚠️ Document **'{target_name}'** is not available in local storage. Please re-upload your document.")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -729,8 +774,15 @@ def render_chat_interface(docs: List[str], current_target_doc: Optional[str]):
                 if st.button("🚀 Index Document", type="primary", use_container_width=True, key="pop_idx_btn"):
                     with st.spinner(f"Indexing '{pop_file.name}'..."):
                         upload_document_universal(pop_file.getvalue(), pop_file.name, replace_existing=pop_clean)
+                        if pop_clean or not st.session_state.session_docs:
+                            st.session_state.session_docs = [pop_file.name]
+                            st.session_state.messages = []
+                        else:
+                            if pop_file.name not in st.session_state.session_docs:
+                                st.session_state.session_docs.append(pop_file.name)
                         st.session_state.selected_doc = pop_file.name
                         st.session_state.pdf_page = 1
+                        st.session_state.active_snippet = None
                         st.rerun()
 
     with act_c2:
@@ -748,9 +800,13 @@ def render_chat_interface(docs: List[str], current_target_doc: Optional[str]):
             st.button("📥 Export", disabled=True, use_container_width=True, key="bottom_export_dis")
 
     with act_c3:
-        if st.button("🗑️ Clear", use_container_width=True, key="bottom_clear_btn", help="Clear conversation"):
+        if st.button("🗑️ Clear", use_container_width=True, key="bottom_clear_btn", help="Clear conversation and remove document"):
+            delete_all_documents_universal()
+            st.session_state.session_docs = []
+            st.session_state.selected_doc = None
             st.session_state.messages = []
             st.session_state.active_snippet = None
+            st.session_state.pdf_page = 1
             st.rerun()
 
     with act_c4:
@@ -848,5 +904,5 @@ if active_docs and st.session_state.view_mode == "📖 Split View":
         render_document_viewer(active_docs, selected_target_doc)
     with pane_col2:
         render_chat_interface(active_docs, selected_target_doc)
-else:
+elif active_docs:
     render_chat_interface(active_docs, selected_target_doc)
