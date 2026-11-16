@@ -21,9 +21,27 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 
 import requests
-import pymupdf
 import streamlit as st
 import streamlit.components.v1 as components
+
+# Safe import for PyMuPDF with fallbacks for cloud deployment
+try:
+    import pymupdf
+    HAS_PYMUPDF = True
+except ImportError:
+    try:
+        import fitz as pymupdf
+        HAS_PYMUPDF = True
+    except ImportError:
+        pymupdf = None
+        HAS_PYMUPDF = False
+
+try:
+    import pypdf
+    HAS_PYPDF = True
+except ImportError:
+    pypdf = None
+    HAS_PYPDF = False
 
 # Sync Streamlit Cloud secrets to os.environ so settings & modules pick them up automatically
 try:
@@ -508,8 +526,21 @@ def render_document_viewer(docs: List[str], current_target_doc: Optional[str]):
 
     if ext == ".pdf" and os.path.exists(raw_path):
         try:
-            doc = pymupdf.open(raw_path)
-            total_pages = len(doc)
+            doc = None
+            total_pages = 1
+            if HAS_PYMUPDF:
+                try:
+                    doc = pymupdf.open(raw_path)
+                    total_pages = max(1, len(doc))
+                except Exception:
+                    doc = None
+            
+            if doc is None and HAS_PYPDF:
+                try:
+                    reader = pypdf.PdfReader(raw_path)
+                    total_pages = max(1, len(reader.pages))
+                except Exception:
+                    total_pages = 1
 
             # Ensure page bounds
             if st.session_state.pdf_page < 1:
@@ -559,41 +590,13 @@ def render_document_viewer(docs: List[str], current_target_doc: Optional[str]):
                     unsafe_allow_html=True,
                 )
 
-            # Document Tabs: High-Res Slide View vs Embedded PDF
-            tab_slide, tab_embed = st.tabs(["🖼️ High-Res Slide View", "📜 Native PDF Embed"])
-
-            with tab_slide:
-                page_obj = doc.load_page(cur_page - 1)
-
-                # Search and highlight active citation text on the slide
-                if st.session_state.get("active_snippet"):
-                    try:
-                        clean_text = re.sub(r'[\r\n\t]+', ' ', st.session_state.active_snippet).strip()
-                        words = [w for w in clean_text.split() if len(w) > 3][:6]
-                        search_phrase = " ".join(words[:4]) if words else clean_text[:25]
-                        rects = page_obj.search_for(search_phrase)
-                        if not rects and words:
-                            rects = page_obj.search_for(words[0])
-                        for r in rects:
-                            annot = page_obj.add_highlight_annot(r)
-                            if annot:
-                                annot.set_colors(stroke=(1.0, 0.82, 0.0))
-                                annot.update()
-                    except Exception:
-                        pass
-
-                pix = page_obj.get_pixmap(dpi=140)
-                st.markdown('<div class="page-canvas-wrapper">', unsafe_allow_html=True)
-                st.image(pix.tobytes("png"), use_container_width=True)
-                st.markdown('</div>', unsafe_allow_html=True)
-
-            with tab_embed:
+            def render_native_pdf(t_name: str, r_path: str, page_num: int):
                 if HAS_FASTAPI_SERVER:
-                    encoded_name = urllib.parse.quote(target_name)
-                    raw_url = f"http://localhost:8000/api/v1/documents/raw/{encoded_name}?p={cur_page}&ts={int(time.time()*1000)}#page={cur_page}&view=FitH,0,0"
+                    encoded_name = urllib.parse.quote(t_name)
+                    raw_url = f"http://localhost:8000/api/v1/documents/raw/{encoded_name}?p={page_num}&ts={int(time.time()*1000)}#page={page_num}&view=FitH,0,0"
                     components.html(
                         f"""
-                        <iframe id="pdf_frame_{cur_page}" 
+                        <iframe id="pdf_frame_{page_num}" 
                                 src="{raw_url}" 
                                 width="100%" 
                                 height="700px" 
@@ -603,12 +606,12 @@ def render_document_viewer(docs: List[str], current_target_doc: Optional[str]):
                         height=710,
                     )
                 else:
-                    with open(raw_path, "rb") as f:
+                    with open(r_path, "rb") as f:
                         b64_pdf = base64.b64encode(f.read()).decode("utf-8")
                     components.html(
                         f"""
-                        <iframe id="pdf_frame_{cur_page}_{int(time.time()*1000)}" 
-                                src="data:application/pdf;base64,{b64_pdf}#page={cur_page}&view=FitH,0,0" 
+                        <iframe id="pdf_frame_{page_num}_{int(time.time()*1000)}" 
+                                src="data:application/pdf;base64,{b64_pdf}#page={page_num}&view=FitH,0,0" 
                                 width="100%" 
                                 height="700px" 
                                 type="application/pdf" 
@@ -617,6 +620,40 @@ def render_document_viewer(docs: List[str], current_target_doc: Optional[str]):
                         """,
                         height=710,
                     )
+
+            if doc is not None:
+                # Document Tabs: High-Res Slide View vs Embedded PDF
+                tab_slide, tab_embed = st.tabs(["🖼️ High-Res Slide View", "📜 Native PDF Embed"])
+
+                with tab_slide:
+                    page_obj = doc.load_page(cur_page - 1)
+
+                    # Search and highlight active citation text on the slide
+                    if st.session_state.get("active_snippet"):
+                        try:
+                            clean_text = re.sub(r'[\r\n\t]+', ' ', st.session_state.active_snippet).strip()
+                            words = [w for w in clean_text.split() if len(w) > 3][:6]
+                            search_phrase = " ".join(words[:4]) if words else clean_text[:25]
+                            rects = page_obj.search_for(search_phrase)
+                            if not rects and words:
+                                rects = page_obj.search_for(words[0])
+                            for r in rects:
+                                annot = page_obj.add_highlight_annot(r)
+                                if annot:
+                                    annot.set_colors(stroke=(1.0, 0.82, 0.0))
+                                    annot.update()
+                        except Exception:
+                            pass
+
+                    pix = page_obj.get_pixmap(dpi=140)
+                    st.markdown('<div class="page-canvas-wrapper">', unsafe_allow_html=True)
+                    st.image(pix.tobytes("png"), use_container_width=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                with tab_embed:
+                    render_native_pdf(target_name, raw_path, cur_page)
+            else:
+                render_native_pdf(target_name, raw_path, cur_page)
 
         except Exception as e:
             st.error(f"Error rendering PDF: {str(e)}")
