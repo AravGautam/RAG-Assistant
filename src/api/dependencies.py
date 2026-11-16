@@ -5,7 +5,7 @@ from functools import lru_cache
 from typing import Optional
 from fastapi import Depends
 
-from config.settings import Settings, get_settings
+from src.config.settings import Settings, get_settings
 from src.embeddings.embedder import Embedder
 from src.vectorstore.client import ChromaVectorStore
 from src.generation.llm import GeminiLLM

@@ -28,13 +28,13 @@ Major_Project/
 ├── README.md                        # Documentation
 ├── app.py                           # Full-screen interactive Streamlit UI
 │
-├── config/
-│   ├── __init__.py
-│   ├── settings.py                  # Pydantic v2 BaseSettings (Gemini, Embeddings, Chroma)
-│   └── logging_config.py            # Structured logging configuration
-│
 └── src/
     ├── __init__.py
+    │
+    ├── config/                      # Central configuration & structured logging
+    │   ├── __init__.py
+    │   ├── settings.py              # Pydantic v2 BaseSettings (Gemini, Embeddings, Chroma)
+    │   └── logging_config.py        # Structured logging configuration
     │
     ├── ingestion/
     │   ├── __init__.py

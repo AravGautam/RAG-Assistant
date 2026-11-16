@@ -8,7 +8,7 @@ import requests
 import streamlit as st
 from typing import List, Dict, Any, Optional
 
-from config.settings import get_settings
+from src.config.settings import get_settings
 
 # Page Configuration: Full width, no sidebar
 st.set_page_config(

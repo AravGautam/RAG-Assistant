@@ -8,8 +8,8 @@ from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from config.settings import Settings, get_settings
-from config.logging_config import setup_logging
+from src.config.settings import Settings, get_settings
+from src.config.logging_config import setup_logging
 from src.api.schemas import HealthResponse
 from src.api.routes import chat_router, documents_router
 from src.api.dependencies import get_pipeline
