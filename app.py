@@ -135,14 +135,16 @@ def get_direct_pipeline():
 
 
 def get_active_gemini_key() -> str:
-    """Retrieve Gemini API key from session state, environment, or Streamlit Cloud Secrets."""
-    if "user_api_key" in st.session_state and st.session_state.user_api_key:
-        return st.session_state.user_api_key
+    """Retrieve Gemini API key strictly from environment variables or Streamlit Cloud Secrets."""
+    if hasattr(st, "secrets"):
+        try:
+            if "GOOGLE_API_KEY" in st.secrets:
+                return str(st.secrets["GOOGLE_API_KEY"]).strip()
+        except Exception:
+            pass
     if settings.google_api_key:
-        return settings.google_api_key
-    if hasattr(st, "secrets") and "GOOGLE_API_KEY" in st.secrets:
-        return st.secrets["GOOGLE_API_KEY"]
-    return ""
+        return settings.google_api_key.strip()
+    return os.getenv("GOOGLE_API_KEY", "").strip()
 
 
 # Initialize in-process pipeline if FastAPI is not detected
@@ -207,7 +209,7 @@ def query_rag_universal(question: str, target_doc: Optional[str] = None) -> Dict
         # Update LLM with active key
         active_key = get_active_gemini_key()
         if not active_key:
-            raise ValueError("Google Gemini API Key is required. Please provide it in the API Key settings.")
+            raise ValueError("GOOGLE_API_KEY environment variable is missing. Add it to your .env file or Streamlit Cloud Secrets.")
         from src.generation.llm import GeminiLLM
         direct_pipeline.llm = GeminiLLM(api_key=active_key)
 
@@ -244,14 +246,6 @@ with top_col2:
         unsafe_allow_html=True,
     )
 
-# API Key Alert & Inline Setting (if missing)
-if not active_key:
-    with st.expander("🔑 Google Gemini API Key Required", expanded=True):
-        st.info("A free Google Gemini API Key is needed to generate grounded answers. Get one from [Google AI Studio](https://aistudio.google.com/).")
-        key_input = st.text_input("Enter Gemini API Key", type="password", placeholder="AIzaSy...")
-        if key_input:
-            st.session_state.user_api_key = key_input.strip()
-            st.rerun()
 
 
 # ==========================================
