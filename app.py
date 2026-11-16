@@ -11,6 +11,15 @@ from typing import List, Dict, Any, Optional, Tuple
 import requests
 import streamlit as st
 
+# Sync Streamlit Cloud secrets to os.environ so settings & modules pick them up automatically
+try:
+    if hasattr(st, "secrets"):
+        for _k, _v in st.secrets.items():
+            if isinstance(_v, (str, int, float, bool)) and _k not in os.environ:
+                os.environ[_k] = str(_v)
+except Exception:
+    pass
+
 from src.config.settings import get_settings
 
 # ==========================================
@@ -122,7 +131,15 @@ def get_direct_pipeline():
     )
 
     api_key = get_active_gemini_key()
-    llm = GeminiLLM(api_key=api_key) if api_key else None
+    llm = (
+        GeminiLLM(
+            api_key=api_key,
+            model=settings.gemini_model,
+            temperature=settings.gemini_temperature,
+        )
+        if api_key
+        else None
+    )
 
     return RAGPipeline(
         vector_store=vector_store,
@@ -211,7 +228,11 @@ def query_rag_universal(question: str, target_doc: Optional[str] = None) -> Dict
         if not active_key:
             raise ValueError("GOOGLE_API_KEY environment variable is missing. Add it to your .env file or Streamlit Cloud Secrets.")
         from src.generation.llm import GeminiLLM
-        direct_pipeline.llm = GeminiLLM(api_key=active_key)
+        direct_pipeline.llm = GeminiLLM(
+            api_key=active_key,
+            model=settings.gemini_model,
+            temperature=settings.gemini_temperature,
+        )
 
         return run_async_safe(direct_pipeline.query(question=question, top_k=5, filter_dict=filter_dict))
 
