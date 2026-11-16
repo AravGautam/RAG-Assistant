@@ -1,16 +1,21 @@
 """
-📚 Modular Production RAG Application - Streamlit Web UI (Single-Page Layout)
-Clean, modern full-screen interface with inline document ingestion (No Sidebar).
+📚 Modular Production RAG Application - Streamlit Web UI
+Universal Hybrid Frontend: Supports both FastAPI backend and standalone/Streamlit Cloud direct mode.
 """
 import os
 import json
+import asyncio
+import concurrent.futures
+from typing import List, Dict, Any, Optional, Tuple
+
 import requests
 import streamlit as st
-from typing import List, Dict, Any, Optional
 
 from src.config.settings import get_settings
 
-# Page Configuration: Full width, no sidebar
+# ==========================================
+# Page Configuration & Clean Styling
+# ==========================================
 st.set_page_config(
     page_title="PDF RAG Assistant",
     page_icon="📚",
@@ -18,7 +23,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Custom Styling for full-width layout
 st.markdown("""
 <style>
     /* Hide Streamlit sidebar completely */
@@ -26,6 +30,12 @@ st.markdown("""
         display: none !important;
     }
     [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+    /* Hide Streamlit Deploy button & menu */
+    [data-testid="stDeployButton"],
+    .stDeployButton,
+    #MainMenu {
         display: none !important;
     }
 
@@ -42,20 +52,11 @@ st.markdown("""
     }
     .badge-online {
         display: inline-block;
-        padding: 3px 10px;
+        padding: 4px 12px;
         background-color: #DCFCE7;
         color: #166534;
         border-radius: 9999px;
-        font-size: 0.8rem;
-        font-weight: 600;
-    }
-    .badge-offline {
-        display: inline-block;
-        padding: 3px 10px;
-        background-color: #FEE2E2;
-        color: #991B1B;
-        border-radius: 9999px;
-        font-size: 0.8rem;
+        font-size: 0.82rem;
         font-weight: 600;
     }
     .doc-banner {
@@ -75,48 +76,157 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# ==========================================
+# Hybrid Architecture: FastAPI & In-Process Fallback
+# ==========================================
 settings = get_settings()
 API_BASE_URL = f"http://localhost:{settings.port}"
 
 
-def check_backend_health() -> Optional[Dict[str, Any]]:
-    """Check if the FastAPI backend is running."""
+def run_async_safe(coro):
+    """Safely execute an asynchronous coroutine in Streamlit without event loop collisions."""
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        return executor.submit(asyncio.run, coro).result()
+
+
+def check_fastapi_backend() -> bool:
+    """Check if the local FastAPI server is reachable."""
     try:
-        response = requests.get(f"{API_BASE_URL}/health", timeout=3)
-        if response.status_code == 200:
-            return response.json()
+        res = requests.get(f"{API_BASE_URL}/health", timeout=1.5)
+        return res.status_code == 200
     except Exception:
-        pass
-    return None
+        return False
 
 
-def fetch_indexed_documents() -> Dict[str, Any]:
-    """Fetch the list of indexed documents from the backend."""
-    try:
-        response = requests.get(f"{API_BASE_URL}/api/v1/documents", timeout=5)
-        if response.status_code == 200:
-            return response.json()
-    except Exception:
-        pass
-    return {"documents": [], "total_documents": 0, "total_chunks": 0}
+# Determine operating mode
+HAS_FASTAPI_SERVER = check_fastapi_backend()
 
 
-# Initialize Session State
+@st.cache_resource(show_spinner="Initializing in-process RAG pipeline...")
+def get_direct_pipeline():
+    """Fallback in-process pipeline for Streamlit Community Cloud and standalone mode."""
+    from src.embeddings.embedder import Embedder
+    from src.vectorstore.client import ChromaVectorStore
+    from src.generation.llm import GeminiLLM
+    from src.pipeline.rag_pipeline import RAGPipeline
+
+    embedder = Embedder.get_instance(
+        model_name=settings.embedding_model_name,
+        device=settings.embedding_device,
+    )
+    vector_store = ChromaVectorStore(
+        persist_directory=settings.chroma_persist_directory,
+        collection_name=settings.chroma_collection_name,
+        embedder=embedder,
+    )
+
+    api_key = get_active_gemini_key()
+    llm = GeminiLLM(api_key=api_key) if api_key else None
+
+    return RAGPipeline(
+        vector_store=vector_store,
+        llm=llm,
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+        top_k=settings.retrieval_top_k,
+        similarity_threshold=settings.similarity_threshold,
+    )
+
+
+def get_active_gemini_key() -> str:
+    """Retrieve Gemini API key from session state, environment, or Streamlit Cloud Secrets."""
+    if "user_api_key" in st.session_state and st.session_state.user_api_key:
+        return st.session_state.user_api_key
+    if settings.google_api_key:
+        return settings.google_api_key
+    if hasattr(st, "secrets") and "GOOGLE_API_KEY" in st.secrets:
+        return st.secrets["GOOGLE_API_KEY"]
+    return ""
+
+
+# Initialize in-process pipeline if FastAPI is not detected
+direct_pipeline = None if HAS_FASTAPI_SERVER else get_direct_pipeline()
+
+
+# ==========================================
+# Document & Query Handlers (Universal)
+# ==========================================
+def get_indexed_documents() -> Tuple[List[str], int]:
+    """Retrieve indexed documents in either FastAPI mode or Direct mode."""
+    if HAS_FASTAPI_SERVER:
+        try:
+            res = requests.get(f"{API_BASE_URL}/api/v1/documents", timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                return data.get("documents", []), data.get("total_chunks", 0)
+        except Exception:
+            pass
+    if direct_pipeline:
+        return direct_pipeline.list_documents(), direct_pipeline.count()
+    return [], 0
+
+
+def upload_document_universal(file_bytes: bytes, filename: str, replace_existing: bool) -> Dict[str, Any]:
+    """Index a document via FastAPI or direct pipeline."""
+    if HAS_FASTAPI_SERVER:
+        files = {"file": (filename, file_bytes, "application/octet-stream")}
+        params = {"clear_existing": "true" if replace_existing else "false"}
+        res = requests.post(f"{API_BASE_URL}/api/v1/documents/upload", files=files, params=params, timeout=60)
+        if res.status_code == 201:
+            return res.json()
+        raise RuntimeError(f"FastAPI upload error ({res.status_code}): {res.text}")
+    else:
+        return direct_pipeline.index_document(file_bytes=file_bytes, filename=filename, clear_existing=replace_existing)
+
+
+def delete_all_documents_universal() -> int:
+    """Clear all documents via FastAPI or direct pipeline."""
+    if HAS_FASTAPI_SERVER:
+        res = requests.delete(f"{API_BASE_URL}/api/v1/documents/clear-all", timeout=5)
+        if res.status_code == 200:
+            return res.json().get("chunks_cleared", 0)
+    if direct_pipeline:
+        return direct_pipeline.clear_all()
+    return 0
+
+
+def query_rag_universal(question: str, target_doc: Optional[str] = None) -> Dict[str, Any]:
+    """Query RAG assistant via FastAPI or direct pipeline."""
+    filter_dict = {"filename": target_doc} if target_doc else None
+
+    if HAS_FASTAPI_SERVER:
+        payload = {"query": question, "top_k": 5}
+        if filter_dict:
+            payload["filter"] = filter_dict
+        res = requests.post(f"{API_BASE_URL}/api/v1/chat", json=payload, timeout=60)
+        if res.status_code == 200:
+            return res.json()
+        raise RuntimeError(f"FastAPI chat error ({res.status_code}): {res.text}")
+    else:
+        # Update LLM with active key
+        active_key = get_active_gemini_key()
+        if not active_key:
+            raise ValueError("Google Gemini API Key is required. Please provide it in the API Key settings.")
+        from src.generation.llm import GeminiLLM
+        direct_pipeline.llm = GeminiLLM(api_key=active_key)
+
+        return run_async_safe(direct_pipeline.query(question=question, top_k=5, filter_dict=filter_dict))
+
+
+# Initialize UI Session State
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 if "show_uploader" not in st.session_state:
     st.session_state.show_uploader = False
 
-# Backend state check
-backend_health = check_backend_health()
-doc_info = fetch_indexed_documents() if backend_health else {"documents": [], "total_documents": 0, "total_chunks": 0}
-active_docs = doc_info.get("documents", [])
-total_chunks = doc_info.get("total_chunks", 0)
+active_docs, total_chunks = get_indexed_documents()
+active_key = get_active_gemini_key()
 
 
 # ==========================================
-# 1. Header & Navigation (Main Screen)
+# 1. Header & System Status
 # ==========================================
 top_col1, top_col2 = st.columns([3, 1])
 
@@ -128,23 +238,25 @@ with top_col1:
     )
 
 with top_col2:
-    if backend_health:
-        st.markdown(
-            f'<div style="text-align: right;"><span class="badge-online">🟢 FastAPI Connected (v{backend_health.get("version", "1.0.0")})</span></div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            '<div style="text-align: right;"><span class="badge-offline">🔴 Backend Offline</span></div>',
-            unsafe_allow_html=True,
-        )
+    mode_label = "FastAPI Backend" if HAS_FASTAPI_SERVER else "Streamlit Cloud Engine"
+    st.markdown(
+        f'<div style="text-align: right;"><span class="badge-online">🟢 Online ({mode_label})</span></div>',
+        unsafe_allow_html=True,
+    )
+
+# API Key Alert & Inline Setting (if missing)
+if not active_key:
+    with st.expander("🔑 Google Gemini API Key Required", expanded=True):
+        st.info("A free Google Gemini API Key is needed to generate grounded answers. Get one from [Google AI Studio](https://aistudio.google.com/).")
+        key_input = st.text_input("Enter Gemini API Key", type="password", placeholder="AIzaSy...")
+        if key_input:
+            st.session_state.user_api_key = key_input.strip()
+            st.rerun()
 
 
 # ==========================================
 # 2. Inline Document Ingestion (Main Screen)
 # ==========================================
-
-# Case A: Document is already active -> Display compact active bar
 if active_docs and not st.session_state.show_uploader:
     current_doc = active_docs[0]
 
@@ -167,14 +279,13 @@ if active_docs and not st.session_state.show_uploader:
 
         with b_col3:
             if st.button("🗑️ Clear Document", use_container_width=True):
-                requests.delete(f"{API_BASE_URL}/api/v1/documents/clear-all")
+                delete_all_documents_universal()
                 st.session_state.messages = []
                 st.session_state.show_uploader = True
                 st.rerun()
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-# Case B: No document active OR user clicked "Upload New PDF"
 else:
     with st.container():
         st.markdown('<div class="upload-card">', unsafe_allow_html=True)
@@ -196,29 +307,20 @@ else:
 
         if uploaded_file is not None:
             if st.button("🚀 Index & Start Chatting", type="primary", use_container_width=True):
-                if not backend_health:
-                    st.error("Cannot index: FastAPI backend is offline.")
-                else:
-                    with st.spinner(f"Indexing '{uploaded_file.name}' into vector store..."):
-                        try:
-                            files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type or "application/octet-stream")}
-                            params = {"clear_existing": "true" if replace_docs else "false"}
-                            res = requests.post(
-                                f"{API_BASE_URL}/api/v1/documents/upload",
-                                files=files,
-                                params=params,
-                                timeout=60,
-                            )
-                            if res.status_code == 201:
-                                data = res.json()
-                                st.success(f"Indexed **{data['total_chunks']}** chunks from **{data['filename']}**!")
-                                st.session_state.messages = []
-                                st.session_state.show_uploader = False
-                                st.rerun()
-                            else:
-                                st.error(f"Upload failed ({res.status_code}): {res.text}")
-                        except Exception as e:
-                            st.error(f"Error communicating with backend: {str(e)}")
+                with st.spinner(f"Indexing '{uploaded_file.name}' into vector store..."):
+                    try:
+                        stats = upload_document_universal(
+                            file_bytes=uploaded_file.getvalue(),
+                            filename=uploaded_file.name,
+                            replace_existing=replace_docs,
+                        )
+                        chunk_count = stats.get("total_chunks", 0)
+                        st.success(f"Indexed **{chunk_count}** chunks from **{uploaded_file.name}**!")
+                        st.session_state.messages = []
+                        st.session_state.show_uploader = False
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to index document: {str(e)}")
 
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -244,54 +346,42 @@ else:
                         st.markdown(f"> {cite['content']}")
                         st.divider()
 
-    # Chat Input Box at bottom of screen
+    # Chat Input Box
     user_query = st.chat_input("Ask any question or request a summary of your document...")
 
     if user_query:
-        # Display user message
         st.session_state.messages.append({"role": "user", "content": user_query})
         with st.chat_message("user"):
             st.markdown(user_query)
 
-        # Generate Assistant Response
         with st.chat_message("assistant"):
-            if not backend_health:
-                st.error("Cannot query: FastAPI backend is offline.")
-            else:
-                with st.spinner("Searching document and generating answer..."):
-                    try:
-                        payload = {"query": user_query, "top_k": 5}
-                        if active_docs:
-                            payload["filter"] = {"filename": active_docs[0]}
+            with st.spinner("Searching document and generating answer..."):
+                try:
+                    result = query_rag_universal(
+                        question=user_query,
+                        target_doc=active_docs[0] if active_docs else None,
+                    )
 
-                        response = requests.post(f"{API_BASE_URL}/api/v1/chat", json=payload, timeout=60)
+                    answer_text = result.get("answer", "")
+                    citations = result.get("citations", [])
 
-                        if response.status_code == 200:
-                            data = response.json()
-                            answer_text = data.get("answer", "")
-                            citations = data.get("citations", [])
+                    st.markdown(answer_text)
 
-                            st.markdown(answer_text)
+                    if citations:
+                        with st.expander(f"📄 View Source Citations ({len(citations)} references)"):
+                            for cite in citations:
+                                st.markdown(
+                                    f"**Source {cite['source_id']} — {cite['filename']} (Page {cite['page']})** "
+                                    f"| Relevance: `{cite.get('score', 0.0):.2f}`"
+                                )
+                                st.markdown(f"> {cite['content']}")
+                                st.divider()
 
-                            if citations:
-                                with st.expander(f"📄 View Source Citations ({len(citations)} references)"):
-                                    for cite in citations:
-                                        st.markdown(
-                                            f"**Source {cite['source_id']} — {cite['filename']} (Page {cite['page']})** "
-                                            f"| Relevance: `{cite.get('score', 0.0):.2f}`"
-                                        )
-                                        st.markdown(f"> {cite['content']}")
-                                        st.divider()
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": answer_text,
+                        "citations": citations,
+                    })
 
-                            # Save to chat history
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": answer_text,
-                                "citations": citations,
-                            })
-
-                        else:
-                            st.error(f"Error ({response.status_code}): {response.text}")
-
-                    except Exception as e:
-                        st.error(f"Failed to query backend: {str(e)}")
+                except Exception as e:
+                    st.error(f"Error generating answer: {str(e)}")
