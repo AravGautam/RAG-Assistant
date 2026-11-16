@@ -40,6 +40,7 @@ async def chat(
             question=request.query,
             top_k=request.top_k,
             filter_dict=request.filter,
+            chat_history=request.chat_history,
         )
 
         citations_pydantic = [Citation(**cite) for cite in result["citations"]]
@@ -82,6 +83,7 @@ async def chat_stream(
                 question=request.query,
                 top_k=request.top_k,
                 filter_dict=request.filter,
+                chat_history=request.chat_history,
             )
 
             # Stream text tokens

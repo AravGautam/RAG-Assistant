@@ -46,6 +46,13 @@ class BaseVectorStore(ABC):
         pass
 
     @abstractmethod
+    def get_all_documents(self, filter_dict: Optional[Dict[str, Any]] = None) -> List[Document]:
+        """
+        Retrieve all document chunks, optionally filtered by metadata.
+        """
+        pass
+
+    @abstractmethod
     def delete_by_source(self, filename: str) -> int:
         """
         Remove all document chunks associated with a specific filename.

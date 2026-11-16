@@ -1,12 +1,13 @@
 """
-Retriever component interfacing between query processing and vector store.
+Retriever component interfacing between query processing, vector store, and BM25 search.
+Implements Hybrid Dense + Lexical Retrieval with Reciprocal Rank Fusion (RRF).
 """
-import re
 import logging
 from typing import List, Tuple, Dict, Any, Optional
 from langchain_core.documents import Document
 
 from src.vectorstore.base import BaseVectorStore
+from src.retrieval.bm25 import BM25Retriever
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +27,17 @@ SUMMARY_KEYWORDS = [
     "explain this pdf",
     "explain this document",
     "tell me about this",
+    "what does this contain",
 ]
 
 
-class VectorRetriever:
+class HybridRetriever:
     """
-    Retrieves the most relevant document chunks from the vector store with
-    intelligent broad-query and summarization awareness.
+    Hybrid Retriever combining:
+    1. Dense Vector Similarity (ChromaDB + sentence-transformers)
+    2. BM25 Lexical Keyword Matching
+    3. Reciprocal Rank Fusion (RRF)
+    4. Structural / Summary query detection
     """
 
     def __init__(
@@ -44,6 +49,20 @@ class VectorRetriever:
         self.vector_store = vector_store
         self.top_k = top_k
         self.score_threshold = score_threshold
+        self._bm25 = BM25Retriever()
+        self._bm25_doc_count = -1
+
+    def _sync_bm25_index(self, filter_dict: Optional[Dict[str, Any]] = None) -> None:
+        """Ensure BM25 index reflects current vector store documents."""
+        try:
+            current_count = self.vector_store.count()
+            if current_count != self._bm25_doc_count or current_count == 0:
+                all_docs = self.vector_store.get_all_documents()
+                self._bm25.index_documents(all_docs)
+                self._bm25_doc_count = current_count
+                logger.info("Synchronized BM25 index with %d documents", len(all_docs))
+        except Exception as e:
+            logger.warning("Failed to synchronize BM25 index: %s", str(e))
 
     @classmethod
     def is_summary_query(cls, query: str) -> bool:
@@ -63,17 +82,15 @@ class VectorRetriever:
         filter_dict: Optional[Dict[str, Any]] = None,
     ) -> List[Tuple[Document, float]]:
         """
-        Retrieve chunks with distance/relevance scores.
-
-        For broad or summarization queries, automatically includes introductory chunks
-        (e.g. title slide, agenda, abstract) to ensure a complete and grounded overview.
+        Perform hybrid retrieval combining dense vector search and BM25 keyword search
+        using Reciprocal Rank Fusion (RRF).
         """
         limit = k or self.top_k
         target_file = filter_dict.get("filename") if filter_dict else None
 
         results: List[Tuple[Document, float]] = []
 
-        # If summary/overview request: pull initial structural chunks first
+        # 1. Structural / Summary Query Handling
         if self.is_summary_query(query):
             logger.info("Detected summary query: '%s'. Fetching initial document chunks.", query)
             initial_chunks = self.vector_store.get_initial_chunks(
@@ -81,13 +98,62 @@ class VectorRetriever:
             )
             results.extend(initial_chunks)
 
-        # Standard vector similarity search
-        vector_matches = self.vector_store.similarity_search_with_score(
-            query=query,
-            k=limit,
-            filter_dict=filter_dict,
-        )
-        results.extend(vector_matches)
+        # 2. Dense Vector Similarity Search
+        try:
+            dense_matches = self.vector_store.similarity_search_with_score(
+                query=query,
+                k=limit * 2,
+                filter_dict=filter_dict,
+            )
+        except Exception as e:
+            logger.warning("Dense vector search failed: %s", str(e))
+            dense_matches = []
 
-        logger.debug("Retrieved %d candidates for query: '%s'", len(results), query[:50])
+        # 3. BM25 Lexical Keyword Search
+        self._sync_bm25_index(filter_dict)
+        try:
+            bm25_matches = self._bm25.search(
+                query=query,
+                k=limit * 2,
+                filter_dict=filter_dict,
+            )
+        except Exception as e:
+            logger.warning("BM25 lexical search failed: %s", str(e))
+            bm25_matches = []
+
+        # 4. Reciprocal Rank Fusion (RRF)
+        # RRF Score = sum(weight / (60 + rank))
+        rrf_scores: Dict[str, float] = {}
+        doc_map: Dict[str, Document] = {}
+
+        # Dense rank scoring (weight = 1.0)
+        for rank, (doc, _) in enumerate(dense_matches):
+            doc_key = doc.page_content.strip()[:120]
+            doc_map[doc_key] = doc
+            rrf_scores[doc_key] = rrf_scores.get(doc_key, 0.0) + (1.0 / (60.0 + rank))
+
+        # BM25 rank scoring (weight = 0.8)
+        for rank, (doc, _) in enumerate(bm25_matches):
+            doc_key = doc.page_content.strip()[:120]
+            doc_map[doc_key] = doc
+            rrf_scores[doc_key] = rrf_scores.get(doc_key, 0.0) + (0.8 / (60.0 + rank))
+
+        # Merge ranked hybrid results
+        sorted_hybrid = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+        for doc_key, score in sorted_hybrid[:limit * 2]:
+            # Convert RRF score into distance-like metric for downstream compatibility (smaller distance = better)
+            # Distance approximation: max(0.0, 1.0 - (score * 30.0))
+            sim_dist = max(0.01, round(1.0 - (score * 25.0), 4))
+            results.append((doc_map[doc_key], sim_dist))
+
+        logger.debug(
+            "Hybrid retrieval returned %d total candidates (Dense: %d, BM25: %d)",
+            len(results),
+            len(dense_matches),
+            len(bm25_matches),
+        )
         return results
+
+
+# Backward compatibility alias
+VectorRetriever = HybridRetriever

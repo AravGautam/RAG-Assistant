@@ -25,6 +25,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Optional metadata filter (e.g. {'filename': 'report.pdf'}).",
     )
+    chat_history: Optional[List[Dict[str, str]]] = Field(
+        default=None,
+        description="Optional recent multi-turn conversation history for context re-writing.",
+    )
 
 
 class Citation(BaseModel):

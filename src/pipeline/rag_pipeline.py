@@ -2,7 +2,7 @@
 RAG Pipeline Orchestrator coordinating ingestion, retrieval, reranking, and generation.
 """
 import logging
-from typing import List, Dict, Any, Optional, Tuple, AsyncIterator
+from typing import List, Dict, Any, Optional, Tuple, AsyncIterator, Callable
 
 from src.ingestion.loaders import DocumentLoader
 from src.ingestion.cleaners import clean_documents
@@ -97,6 +97,7 @@ class RAGPipeline:
         question: str,
         top_k: Optional[int] = None,
         filter_dict: Optional[Dict[str, Any]] = None,
+        chat_history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """
         Execute full RAG generation pipeline asynchronously.
@@ -107,8 +108,10 @@ class RAGPipeline:
         if not self.llm:
             raise ValueError("LLM is not initialized. Ensure GOOGLE_API_KEY is configured.")
 
-        # 1. Transform query
-        clean_query = QueryTransformer.transform(question)
+        # 1. Transform and contextualize query with chat history
+        clean_query = QueryTransformer.contextualize_query(
+            question, chat_history=chat_history, llm=self.llm
+        )
 
         # 2. Retrieve candidates
         k_val = top_k or self.top_k
@@ -128,6 +131,7 @@ class RAGPipeline:
                 "citations": [],
                 "model": self.llm.model,
                 "is_grounded": False,
+                "effective_query": clean_query,
             }
 
         # 5. Build prompt messages
@@ -145,13 +149,74 @@ class RAGPipeline:
             "citations": citations,
             "model": self.llm.model,
             "is_grounded": is_grounded,
+            "effective_query": clean_query,
         }
+
+    def query_stream_sync(
+        self,
+        question: str,
+        top_k: Optional[int] = None,
+        filter_dict: Optional[Dict[str, Any]] = None,
+        chat_history: Optional[List[Dict[str, str]]] = None,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[Any, List[Dict[str, Any]], str]:
+        """
+        Synchronously stream RAG tokens for Streamlit st.write_stream().
+
+        Returns:
+            Tuple of (token_iterator, citations, effective_query).
+        """
+        if not self.llm:
+            raise ValueError("LLM is not initialized. Ensure GOOGLE_API_KEY is configured.")
+
+        # 1. Transform & contextualize query
+        if status_callback:
+            status_callback("🧠 Step 1: Contextualizing query with conversation history...")
+        effective_query = QueryTransformer.contextualize_query(
+            question, chat_history=chat_history, llm=self.llm
+        )
+
+        # 2. Retrieve candidates
+        if status_callback:
+            target_info = f" in '{filter_dict['filename']}'" if (filter_dict and "filename" in filter_dict and filter_dict["filename"]) else ""
+            status_callback(f"🔎 Step 2: Searching ChromaDB vector store & BM25 keyword index{target_info}...")
+        k_val = top_k or self.top_k
+        raw_candidates = self.retriever.retrieve(effective_query, k=k_val * 2, filter_dict=filter_dict)
+
+        # 3. Rerank & deduplicate
+        if status_callback:
+            status_callback(f"📊 Step 3: Reranking {len(raw_candidates)} candidate chunks & verifying citations...")
+        ranked_docs = Reranker.rerank(
+            raw_candidates, min_score=self.similarity_threshold, top_n=max(k_val, 6)
+        )
+
+        # 4. Format context & citations
+        context_str, citations = format_context(ranked_docs)
+
+        if not ranked_docs:
+            if status_callback:
+                status_callback("⚠️ No matching passages found in the uploaded documents.")
+            def empty_stream():
+                yield "I could not find any relevant information in the uploaded documents."
+            return empty_stream(), [], effective_query
+
+        if status_callback:
+            status_callback(f"✅ Step 4: Grounded context ready ({len(citations)} source passages) — starting generation...")
+
+        # 5. Format prompt
+        prompt_template = get_rag_prompt_template()
+        messages = prompt_template.format_messages(context=context_str, question=effective_query)
+
+        # 6. Stream tokens
+        token_stream = self.llm.stream(messages)
+        return token_stream, citations, effective_query
 
     async def query_stream(
         self,
         question: str,
         top_k: Optional[int] = None,
         filter_dict: Optional[Dict[str, Any]] = None,
+        chat_history: Optional[List[Dict[str, str]]] = None,
     ) -> Tuple[AsyncIterator[str], List[Dict[str, Any]]]:
         """
         Stream RAG answer tokens asynchronously.
@@ -159,7 +224,9 @@ class RAGPipeline:
         if not self.llm:
             raise ValueError("LLM is not initialized. Ensure GOOGLE_API_KEY is configured.")
 
-        clean_query = QueryTransformer.transform(question)
+        clean_query = QueryTransformer.contextualize_query(
+            question, chat_history=chat_history, llm=self.llm
+        )
         k_val = top_k or self.top_k
         raw_candidates = self.retriever.retrieve(clean_query, k=k_val * 2, filter_dict=filter_dict)
 

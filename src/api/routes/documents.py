@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, status
+from fastapi.responses import FileResponse
 
 from src.api.schemas import (
     DocumentUploadResponse,
@@ -115,6 +116,34 @@ async def list_documents(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to query indexed documents: {str(e)}",
         )
+
+
+@router.api_route(
+    "/raw/{filename:path}",
+    methods=["GET", "HEAD"],
+    summary="Get raw document file for inline viewing",
+    description="Stream the raw document file (PDF, TXT, MD) directly for inline browser rendering.",
+)
+async def get_raw_document(filename: str):
+    """
+    Stream the raw document file directly to the browser for embedded viewing.
+    """
+    raw_path = RAW_DATA_DIR / filename
+    if not raw_path.exists() or not raw_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document '{filename}' not found in raw storage.",
+        )
+
+    ext = raw_path.suffix.lower()
+    media_type = "application/pdf" if ext == ".pdf" else "text/plain; charset=utf-8"
+
+    return FileResponse(
+        path=raw_path,
+        media_type=media_type,
+        filename=filename,
+        content_disposition_type="inline",
+    )
 
 
 @router.delete(

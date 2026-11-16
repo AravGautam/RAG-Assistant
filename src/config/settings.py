@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # Google Gemini LLM Settings
     google_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-flash-lite-latest"
     gemini_temperature: float = 0.2
     gemini_max_output_tokens: Optional[int] = 2048
 

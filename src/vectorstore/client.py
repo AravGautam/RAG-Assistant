@@ -121,6 +121,25 @@ class ChromaVectorStore(BaseVectorStore):
             logger.error("Failed to retrieve initial chunks: %s", str(e))
             return []
 
+    def get_all_documents(self, filter_dict: Optional[Dict[str, Any]] = None) -> List[Document]:
+        """
+        Retrieve all document chunks from the collection as LangChain Document objects.
+        """
+        try:
+            records = self._vectorstore._collection.get(
+                where=filter_dict,
+                include=["documents", "metadatas"],
+            )
+            raw_docs = records.get("documents", [])
+            raw_metas = records.get("metadatas", [])
+            return [
+                Document(page_content=text, metadata=meta or {})
+                for text, meta in zip(raw_docs, raw_metas)
+            ]
+        except Exception as e:
+            logger.error("Failed to retrieve all documents: %s", str(e))
+            return []
+
     def delete_by_source(self, filename: str) -> int:
         """
         Remove all chunks associated with a specific file.
