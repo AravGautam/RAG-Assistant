@@ -292,18 +292,23 @@ def get_session_active_documents() -> Tuple[List[str], int]:
 
 
 def upload_document_universal(file_bytes: bytes, filename: str, replace_existing: bool) -> Dict[str, Any]:
-    """Index a document via FastAPI or direct pipeline."""
+    """Index a document via FastAPI and synchronize in-process pipeline for streaming queries."""
     save_uploaded_file(file_bytes, filename, replace_existing)
+    stats: Dict[str, Any] = {}
     if HAS_FASTAPI_SERVER:
-        files = {"file": (filename, file_bytes, "application/octet-stream")}
-        params = {"clear_existing": "true" if replace_existing else "false"}
-        res = requests.post(f"{API_BASE_URL}/api/v1/documents/upload", files=files, params=params, timeout=60)
-        if res.status_code == 201:
-            return res.json()
-        raise RuntimeError(f"FastAPI upload error ({res.status_code}): {res.text}")
-    else:
-        pipeline = direct_pipeline or get_direct_pipeline()
-        return pipeline.index_document(file_bytes=file_bytes, filename=filename, clear_existing=replace_existing)
+        try:
+            files = {"file": (filename, file_bytes, "application/octet-stream")}
+            params = {"clear_existing": "true" if replace_existing else "false"}
+            res = requests.post(f"{API_BASE_URL}/api/v1/documents/upload", files=files, params=params, timeout=60)
+            if res.status_code == 201:
+                stats = res.json()
+        except Exception:
+            pass
+
+    # Ensure direct in-process pipeline is also indexed for instant streaming Q&A
+    pipeline = direct_pipeline or get_direct_pipeline()
+    direct_stats = pipeline.index_document(file_bytes=file_bytes, filename=filename, clear_existing=replace_existing)
+    return stats or direct_stats
 
 
 def delete_all_documents_universal() -> int:
@@ -318,9 +323,10 @@ def delete_all_documents_universal() -> int:
                 except Exception:
                     pass
     if HAS_FASTAPI_SERVER:
-        res = requests.delete(f"{API_BASE_URL}/api/v1/documents/clear-all", timeout=5)
-        if res.status_code == 200:
-            return res.json().get("chunks_cleared", 0)
+        try:
+            requests.delete(f"{API_BASE_URL}/api/v1/documents/clear-all", timeout=5)
+        except Exception:
+            pass
     pipeline = direct_pipeline or get_direct_pipeline()
     return pipeline.clear_all()
 
@@ -544,15 +550,7 @@ elif not active_docs or st.session_state.show_uploader:
                     st.session_state.show_uploader = False
                     st.rerun()
 
-        st.markdown('<div style="margin-top: 18px; border-top: 1px solid #F1F5F9; padding-top: 16px;">', unsafe_allow_html=True)
-        feat_c1, feat_c2, feat_c3 = st.columns(3)
-        with feat_c1:
-            st.markdown("<strong>📖 Dual-Pane Layout</strong><br/><span style='font-size:12px; color:#64748B;'>Interactive PDF preview alongside real-time chat.</span>", unsafe_allow_html=True)
-        with feat_c2:
-            st.markdown("<strong>⚡ ChatGPT Streaming</strong><br/><span style='font-size:12px; color:#64748B;'>Fluid token typing cadence powered by Gemini.</span>", unsafe_allow_html=True)
-        with feat_c3:
-            st.markdown("<strong>🔍 Verified Citations</strong><br/><span style='font-size:12px; color:#64748B;'>Click any citation to jump & highlight text.</span>", unsafe_allow_html=True)
-        st.markdown('</div></div>', unsafe_allow_html=True)
+       
 
 
 # ==========================================
