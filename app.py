@@ -507,14 +507,14 @@ elif not active_docs or st.session_state.show_uploader:
     with st.container():
         st.markdown(
             '<div class="upload-card" style="max-width: 820px; margin: 25px auto; padding: 26px; border: 1px solid #E2E8F0; border-radius: 12px; background: #FFFFFF; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">'
-            '<h3 style="margin-top:0; color:#1E293B;">📄 Welcome! Upload Your Document</h3>'
-            '<p style="color:#64748B; font-size:14px; margin-bottom: 18px;">Upload a PDF, Markdown, or text file to start reading and chatting. Your document is private to your session.</p>',
+            '<h3 style="margin-top:0; color:#1E293B;">📄 Welcome! Upload Your Document or Image</h3>'
+            '<p style="color:#64748B; font-size:14px; margin-bottom: 18px;">Upload a PDF, Image (PNG, JPG, WEBP), Markdown, or text file to start reading and chatting. Your document is private to your session.</p>',
             unsafe_allow_html=True,
         )
 
         uploaded_file = st.file_uploader(
             "Choose file",
-            type=["pdf", "md", "txt"],
+            type=["pdf", "png", "jpg", "jpeg", "webp", "md", "txt"],
             label_visibility="collapsed",
             key="main_session_uploader",
         )
@@ -702,6 +702,16 @@ def render_document_viewer(docs: List[str], current_target_doc: Optional[str]):
         except Exception as e:
             st.error(f"Error rendering PDF: {str(e)}")
 
+    elif ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"] and os.path.exists(raw_path):
+        st.markdown(f"#### 🖼️ {target_name}")
+        st.image(raw_path, use_container_width=True)
+        if st.session_state.get("active_snippet"):
+            st.markdown(
+                f'<div class="highlight-badge">📌 <strong>Focused Citation:</strong><br/>'
+                f'<em>"{st.session_state.active_snippet}"</em></div>',
+                unsafe_allow_html=True,
+            )
+
     elif ext in [".md", ".txt"] and os.path.exists(raw_path):
         with open(raw_path, "r", encoding="utf-8", errors="ignore") as f:
             text_content = f.read()
@@ -759,11 +769,11 @@ def render_chat_interface(docs: List[str], current_target_doc: Optional[str]):
     act_c1, act_c2, act_c3, act_c4 = st.columns([1.6, 1.4, 1.2, 3.8])
 
     with act_c1:
-        with st.popover("📎 Upload PDF", use_container_width=True):
-            st.markdown("##### 📄 Upload Document")
+        with st.popover("📎 Upload Doc/Img", use_container_width=True):
+            st.markdown("##### 📄 Upload Document or Image")
             pop_file = st.file_uploader(
                 "Select file",
-                type=["pdf", "md", "txt"],
+                type=["pdf", "png", "jpg", "jpeg", "webp", "md", "txt"],
                 key="pop_uploader_input",
                 label_visibility="collapsed",
             )

@@ -80,12 +80,14 @@ class HybridRetriever:
         query: str,
         k: Optional[int] = None,
         filter_dict: Optional[Dict[str, Any]] = None,
+        top_k: Optional[int] = None,
+        **kwargs: Any,
     ) -> List[Tuple[Document, float]]:
         """
         Perform hybrid retrieval combining dense vector search and BM25 keyword search
         using Reciprocal Rank Fusion (RRF).
         """
-        limit = k or self.top_k
+        limit = k or top_k or self.top_k
         target_file = filter_dict.get("filename") if filter_dict else None
 
         results: List[Tuple[Document, float]] = []
@@ -121,7 +123,26 @@ class HybridRetriever:
             logger.warning("BM25 lexical search failed: %s", str(e))
             bm25_matches = []
 
-        # 4. Reciprocal Rank Fusion (RRF)
+        # 4. Visual Cross-Modal CLIP Search
+        visual_matches: List[Document] = []
+        try:
+            from src.embeddings.image_embedder import ImageEmbedder
+            query_img_emb = ImageEmbedder.get_instance().embed_text(query)
+            if query_img_emb:
+                img_hits = self.vector_store.search_images(
+                    query_embedding=query_img_emb,
+                    k=limit,
+                    filter_dict=filter_dict,
+                )
+                for hit in img_hits:
+                    if hit.get("distance", 1.0) < 0.45:
+                        meta = hit.get("metadata", {})
+                        doc_text = hit.get("document", "") or f"Visual diagram / image in {meta.get('filename')} (Page {meta.get('page_number', 1)})"
+                        visual_matches.append(Document(page_content=doc_text, metadata=meta))
+        except Exception as e:
+            logger.debug("Visual CLIP search skipped: %s", str(e))
+
+        # 5. Reciprocal Rank Fusion (RRF)
         # RRF Score = sum(weight / (60 + rank))
         rrf_scores: Dict[str, float] = {}
         doc_map: Dict[str, Document] = {}
@@ -137,6 +158,12 @@ class HybridRetriever:
             doc_key = doc.page_content.strip()[:120]
             doc_map[doc_key] = doc
             rrf_scores[doc_key] = rrf_scores.get(doc_key, 0.0) + (0.8 / (60.0 + rank))
+
+        # Visual CLIP rank scoring (weight = 1.0)
+        for rank, doc in enumerate(visual_matches):
+            doc_key = doc.page_content.strip()[:120]
+            doc_map[doc_key] = doc
+            rrf_scores[doc_key] = rrf_scores.get(doc_key, 0.0) + (1.0 / (60.0 + rank))
 
         # Merge ranked hybrid results
         sorted_hybrid = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)

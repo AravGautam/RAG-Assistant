@@ -79,3 +79,26 @@ class BaseVectorStore(ABC):
         List distinct filenames indexed in the vector store.
         """
         pass
+
+    def add_image_embedding(
+        self,
+        image_id: str,
+        embedding: List[float],
+        metadata: Dict[str, Any],
+        document_text: str = "",
+    ) -> None:
+        """Add a multimodal image embedding."""
+        pass
+
+    def search_images(
+        self,
+        query_embedding: List[float],
+        k: int = 3,
+        filter_dict: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Search image embeddings."""
+        return []
+
+    def count_images(self, filename: Optional[str] = None) -> int:
+        """Count image embeddings."""
+        return 0

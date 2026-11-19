@@ -20,7 +20,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
-ALLOWED_EXTENSIONS = {".pdf", ".md", ".markdown", ".txt", ".text"}
+ALLOWED_EXTENSIONS = {
+    ".pdf",
+    ".md",
+    ".markdown",
+    ".txt",
+    ".text",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".bmp",
+    ".tiff",
+}
 RAW_DATA_DIR = Path("data/raw")
 
 
@@ -136,7 +148,13 @@ async def get_raw_document(filename: str):
         )
 
     ext = raw_path.suffix.lower()
-    media_type = "application/pdf" if ext == ".pdf" else "text/plain; charset=utf-8"
+    if ext == ".pdf":
+        media_type = "application/pdf"
+    elif ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"]:
+        sub_type = "jpeg" if ext in [".jpg", ".jpeg"] else ext.lstrip(".")
+        media_type = f"image/{sub_type}"
+    else:
+        media_type = "text/plain; charset=utf-8"
 
     return FileResponse(
         path=raw_path,

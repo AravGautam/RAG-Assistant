@@ -1,6 +1,7 @@
 """
 RAG Pipeline Orchestrator coordinating ingestion, retrieval, reranking, and generation.
 """
+import os
 import logging
 from typing import List, Dict, Any, Optional, Tuple, AsyncIterator, Callable
 
@@ -66,8 +67,11 @@ class RAGPipeline:
         if clear_existing:
             self.clear_all()
 
-        # 1. Load document
-        raw_docs = DocumentLoader.load_from_bytes(file_bytes, filename)
+        # 1. Load document (with multimodal vision & CLIP vector indexing)
+        api_key = getattr(self.llm, "api_key", None) or os.getenv("GOOGLE_API_KEY")
+        raw_docs = DocumentLoader.load_from_bytes(
+            file_bytes, filename, api_key=api_key, vector_store=self.vector_store
+        )
 
         # 2. Clean and sanitize text
         cleaned_docs = clean_documents(raw_docs)
