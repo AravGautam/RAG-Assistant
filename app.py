@@ -190,6 +190,14 @@ def get_active_gemini_key() -> str:
     return os.getenv("GOOGLE_API_KEY", "").strip()
 
 
+def get_active_gemini_model() -> str:
+    """Retrieve active Gemini model dynamically, falling back to supported active endpoints."""
+    raw = (os.getenv("GEMINI_MODEL") or getattr(settings, "gemini_model", "") or "gemini-flash-lite-latest").strip()
+    if raw in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"):
+        return "gemini-flash-lite-latest"
+    return raw
+
+
 @st.cache_resource(show_spinner=False)
 def get_direct_pipeline():
     """Fallback in-process pipeline for Streamlit Community Cloud and standalone mode."""
@@ -212,7 +220,7 @@ def get_direct_pipeline():
     llm = (
         GeminiLLM(
             api_key=api_key,
-            model=settings.gemini_model,
+            model=get_active_gemini_model(),
             temperature=settings.gemini_temperature,
         )
         if api_key
@@ -365,7 +373,7 @@ def query_rag_stream_universal(
     from src.generation.llm import GeminiLLM
     pipeline.llm = GeminiLLM(
         api_key=active_key,
-        model=settings.gemini_model,
+        model=get_active_gemini_model(),
         temperature=settings.gemini_temperature,
     )
 
