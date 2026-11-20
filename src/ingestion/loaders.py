@@ -73,8 +73,8 @@ def describe_image_with_vision(
         if context_hint:
             prompt += f"\nContext hint: {context_hint}"
 
-        # Try gemini-2.5-flash first, then gemini-1.5-flash, then gemini-flash-lite-latest
-        models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-flash-lite-latest"]
+        # Try active models with fallback
+        models = ["gemini-flash-lite-latest", "gemini-3.8-flash", "gemini-1.5-flash"]
         for model in models:
             try:
                 response = client.models.generate_content(model=model, contents=[img, prompt])

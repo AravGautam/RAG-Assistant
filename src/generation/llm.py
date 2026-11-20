@@ -10,6 +10,28 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FALLBACK_MODEL = "gemini-flash-lite-latest"
 
+RETIRED_MODELS = {
+    "gemini-2.5-flash": "gemini-flash-lite-latest",
+    "gemini-2.0-flash": "gemini-flash-lite-latest",
+    "gemini-1.5-flash": "gemini-flash-lite-latest",
+}
+
+
+def _is_recoverable_model_error(err_str: str) -> bool:
+    """Check if the error is due to quota exhaustion, model deprecation, or temporary 503."""
+    indicators = (
+        "resource_exhausted",
+        "429",
+        "quota",
+        "not_found",
+        "404",
+        "no longer available",
+        "unavailable",
+        "503",
+        "deprecated",
+    )
+    return any(k in err_str for k in indicators)
+
 
 def _extract_text(content: Any) -> str:
     """Safely extract plain string from langchain message content (handles str, list of dicts, or ContentBlock)."""
@@ -54,7 +76,8 @@ class GeminiLLM:
             )
 
         self.api_key = api_key
-        self.model = model
+        # Auto-map deprecated or retired model names to active supported endpoints
+        self.model = RETIRED_MODELS.get(model, model)
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
 
@@ -68,8 +91,8 @@ class GeminiLLM:
 
     def _get_fallback_client(self) -> ChatGoogleGenerativeAI:
         """Create a client for the high-quota fallback model."""
-        fallback_model = DEFAULT_FALLBACK_MODEL if self.model != DEFAULT_FALLBACK_MODEL else "gemini-flash-latest"
-        logger.warning("Switching model from '%s' to fallback '%s' due to quota limit", self.model, fallback_model)
+        fallback_model = DEFAULT_FALLBACK_MODEL if self.model != DEFAULT_FALLBACK_MODEL else "gemini-3.8-flash"
+        logger.warning("Switching model from '%s' to fallback '%s' due to quota limit or deprecation", self.model, fallback_model)
         self.model = fallback_model
         self._client = ChatGoogleGenerativeAI(
             model=self.model,
@@ -86,8 +109,8 @@ class GeminiLLM:
             return _extract_text(response.content)
         except Exception as e:
             err_str = str(e).lower()
-            if "resource_exhausted" in err_str or "429" in err_str or "quota" in err_str:
-                logger.warning("Primary model quota exhausted. Retrying with fallback model...")
+            if _is_recoverable_model_error(err_str):
+                logger.warning("Primary model unavailable/exhausted (%s). Retrying with fallback model...", err_str[:80])
                 client = self._get_fallback_client()
                 response = client.invoke(messages)
                 return _extract_text(response.content)
@@ -101,8 +124,8 @@ class GeminiLLM:
             return _extract_text(response.content)
         except Exception as e:
             err_str = str(e).lower()
-            if "resource_exhausted" in err_str or "429" in err_str or "quota" in err_str:
-                logger.warning("Primary model quota exhausted. Retrying with fallback model...")
+            if _is_recoverable_model_error(err_str):
+                logger.warning("Primary model unavailable/exhausted (%s). Retrying with fallback model...", err_str[:80])
                 client = self._get_fallback_client()
                 response = await client.ainvoke(messages)
                 return _extract_text(response.content)
@@ -118,8 +141,8 @@ class GeminiLLM:
                     yield text
         except Exception as e:
             err_str = str(e).lower()
-            if "resource_exhausted" in err_str or "429" in err_str or "quota" in err_str:
-                logger.warning("Primary model quota exhausted in stream. Switching to fallback...")
+            if _is_recoverable_model_error(err_str):
+                logger.warning("Primary model unavailable/exhausted in stream (%s). Switching to fallback...", err_str[:80])
                 client = self._get_fallback_client()
                 for chunk in client.stream(messages):
                     text = _extract_text(chunk.content)
@@ -138,8 +161,8 @@ class GeminiLLM:
                     yield text
         except Exception as e:
             err_str = str(e).lower()
-            if "resource_exhausted" in err_str or "429" in err_str or "quota" in err_str:
-                logger.warning("Primary model quota exhausted in astream. Switching to fallback...")
+            if _is_recoverable_model_error(err_str):
+                logger.warning("Primary model unavailable/exhausted in astream (%s). Switching to fallback...", err_str[:80])
                 client = self._get_fallback_client()
                 async for chunk in client.astream(messages):
                     text = _extract_text(chunk.content)
