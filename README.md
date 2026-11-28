@@ -86,7 +86,7 @@ Major_Project/
 Ensure Python 3.10+ is installed:
 ```bash
 python3 -m venv venv
-source venv/bin/activate
+venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
